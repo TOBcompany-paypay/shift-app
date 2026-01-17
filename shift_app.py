@@ -5,24 +5,37 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from datetime import datetime, date, time, timedelta
 
-# ===== 管理者認証 =====
-query = st.experimental_get_query_params()
-mode = query.get("mode", ["staff"])[0]
+# =============================
+# Query params / mode
+# =============================
+def get_mode() -> str:
+    try:
+        m = st.query_params.get("mode", "staff")
+        if isinstance(m, list):
+            m = m[0]
+        return m or "staff"
+    except Exception:
+        return "staff"
 
-def require_admin():
-    if "admin_authed" not in st.session_state:
-        st.session_state.admin_authed = False
+MODE = get_mode()
 
-    if not st.session_state.admin_authed:
-        pw = st.text_input("管理者パスワード", type="password")
-        if pw == st.secrets["ADMIN_PASSWORD"]:
-            st.session_state.admin_authed = True
-            st.experimental_rerun()
-        else:
-            st.stop()
+# スタッフはスマホ優先で centered、管理者は wide
+st.set_page_config(
+    page_title="Shift Planner",
+    layout="centered" if MODE != "admin" else "wide",
+)
 
-if mode == "admin":
-    require_admin()
+st.title("🗓 シフト管理")
+
+# =============================
+# Config: admin password (Cloud secrets / env)
+# =============================
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+try:
+    if not ADMIN_PASSWORD and "ADMIN_PASSWORD" in st.secrets:
+        ADMIN_PASSWORD = st.secrets["ADMIN_PASSWORD"]
+except Exception:
+    pass
 
 # =============================
 # Storage
@@ -30,19 +43,6 @@ if mode == "admin":
 DATA_DIR = os.path.join(os.path.dirname(__file__), "shift_data")
 os.makedirs(DATA_DIR, exist_ok=True)
 CSV_PATH = os.path.join(DATA_DIR, "shift_requests.csv")
-
-# =============================
-# Config (admin password)
-# =============================
-# どれかで設定できる：
-# 1) 環境変数 ADMIN_PASSWORD
-# 2) Streamlit secrets の ADMIN_PASSWORD
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-try:
-    if not ADMIN_PASSWORD and hasattr(st, "secrets") and "ADMIN_PASSWORD" in st.secrets:
-        ADMIN_PASSWORD = st.secrets["ADMIN_PASSWORD"]
-except Exception:
-    pass
 
 # =============================
 # Helpers
@@ -58,6 +58,9 @@ def parse_hm(s: str):
 
 def dt_of(d: date, t: time) -> datetime:
     return datetime.combine(d, t)
+
+def minutes_from(base, dt):
+    return (dt - base).total_seconds() / 60.0
 
 def clamp_break(start_dt, end_dt, b_start, b_end):
     if b_start is None or b_end is None:
@@ -93,9 +96,6 @@ def working_at_time(segs, qdt):
 def working_in_slot(segs, s0, s1):
     return any((a < s1) and (b > s0) for (a, b) in segs)
 
-def minutes_from(base, dt):
-    return (dt - base).total_seconds() / 60.0
-
 def build_slots(open_dt, close_dt, step_min):
     t = open_dt
     step = timedelta(minutes=step_min)
@@ -105,11 +105,12 @@ def build_slots(open_dt, close_dt, step_min):
         t += step
     return slots
 
-# 15分刻みの選択肢
+# 15分刻み
 TIMES_15 = [(datetime.min + timedelta(minutes=m)).time() for m in range(0, 24*60, 15)]
 def pick_15(label, key, default=time(9, 0)):
     idx = TIMES_15.index(default) if default in TIMES_15 else 0
-    return st.selectbox(label, TIMES_15, index=idx, key=key, format_func=lambda x: x.strftime("%H:%M"))
+    return st.selectbox(label, TIMES_15, index=idx, key=key,
+                        format_func=lambda x: x.strftime("%H:%M"))
 
 def read_data():
     if not os.path.exists(CSV_PATH):
@@ -124,17 +125,33 @@ def read_data():
             "admin_deleted","admin_updated_at"
         ])
     df = pd.read_csv(CSV_PATH)
-    df["date"] = pd.to_datetime(df["date"]).dt.date
+    # date列は date 型に
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"]).dt.date
     # bool整形
     if "admin_deleted" in df.columns:
         df["admin_deleted"] = df["admin_deleted"].fillna(False).astype(bool)
     else:
         df["admin_deleted"] = False
+    # 欠け列の補完（古いデータでも落ちない）
+    for c in [
+        "admin_start","admin_end","admin_break1_start","admin_break1_end",
+        "admin_break2_start","admin_break2_end","admin_note","admin_updated_at"
+    ]:
+        if c not in df.columns:
+            df[c] = ""
+    if "orig_note" not in df.columns:
+        df["orig_note"] = ""
+    if "orig_start" not in df.columns:
+        df["orig_start"] = ""
+    if "orig_end" not in df.columns:
+        df["orig_end"] = ""
+    if "submitted_at" not in df.columns:
+        df["submitted_at"] = ""
     return df
 
 def save_data(df: pd.DataFrame):
     df2 = df.copy()
-    # date をISO文字列に
     df2["date"] = df2["date"].astype(str)
     df2.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
 
@@ -150,41 +167,37 @@ def effective_time(row, col_admin, col_orig):
     return (row.get(col_orig, "") or "").strip()
 
 def is_overridden(row):
-    # admin_start/admin_end どっちか入ってたら「変更あり」とみなす
-    return bool((row.get("admin_start","") or "").strip() or (row.get("admin_end","") or "").strip()
-                or (row.get("admin_break1_start","") or "").strip() or (row.get("admin_break2_start","") or "").strip()
-                or (row.get("admin_note","") or "").strip())
+    return bool(
+        (row.get("admin_start","") or "").strip() or
+        (row.get("admin_end","") or "").strip() or
+        (row.get("admin_break1_start","") or "").strip() or
+        (row.get("admin_break2_start","") or "").strip() or
+        (row.get("admin_note","") or "").strip()
+    )
 
-# =============================
-# App routing by URL
-# =============================
-# Streamlit 1.53: st.query_params が使えます
-try:
-    mode = st.query_params.get("mode", "staff")
-    if isinstance(mode, list):
-        mode = mode[0]
-except Exception:
-    mode = "staff"
-
-# スマホ表示崩れ対策：スタッフは centered
-layout = "centered" if mode != "admin" else "wide"
-st.set_page_config(page_title="Shift Planner", layout=layout)
-
-st.title("🗓 シフト管理")
+def update_row_in_df(df, rid, updates: dict):
+    idx = df.index[df["id"] == rid]
+    if len(idx) == 0:
+        return df
+    i = idx[0]
+    for k, v in updates.items():
+        df.at[i, k] = v
+    return df
 
 # =============================
 # STAFF PAGE (mode=staff)
 # =============================
-if mode != "admin":
+if MODE != "admin":
     st.subheader("✍️ スタッフ：シフト提出")
-    st.caption("※管理者ページは表示されません（スタッフ用URL）。")
+    st.caption("スマホから使う前提のページです（管理者ページは表示されません）。")
 
     if "shift_rows" not in st.session_state:
         st.session_state.shift_rows = [0]
         st.session_state.next_row_id = 1
 
     staff_name = st.text_input("名前（必須）", key="staff_name")
-    common_note = st.text_input("メモ（任意・共通）", key="staff_common_note", placeholder="例：授業のため17時まで")
+    common_note = st.text_input("メモ（任意・共通）", key="staff_common_note",
+                                placeholder="例：授業のため17時まで")
 
     colA, colB = st.columns(2)
     with colA:
@@ -198,7 +211,6 @@ if mode != "admin":
 
     st.divider()
 
-    # 各行：削除ボタン付き
     rows_to_remove = []
     for rid in list(st.session_state.shift_rows):
         with st.container(border=True):
@@ -206,15 +218,15 @@ if mode != "admin":
             with top[0]:
                 st.markdown(f"### シフト {rid+1}")
             with top[1]:
-                if st.button("🗑 この行を削除", key=f"del_row_{rid}"):
+                if st.button("🗑 削除", key=f"del_row_{rid}"):
                     rows_to_remove.append(rid)
 
             d = st.date_input("日付", value=date.today(), key=f"d_{rid}")
             start_t = pick_15("開始（15分単位）", key=f"start_{rid}", default=time(9,0))
             end_t   = pick_15("終了（15分単位）", key=f"end_{rid}", default=time(18,0))
-            note_each = st.text_input("この行のメモ（任意）", key=f"note_{rid}", placeholder="例：15時から用事")
+            note_each = st.text_input("この行のメモ（任意）", key=f"note_{rid}",
+                                      placeholder="例：15時から用事")
 
-    # 削除反映
     if rows_to_remove:
         st.session_state.shift_rows = [r for r in st.session_state.shift_rows if r not in rows_to_remove]
         if not st.session_state.shift_rows:
@@ -254,7 +266,7 @@ if mode != "admin":
                 "orig_end": hm(end_t),
                 "orig_note": merged_note,
 
-                # 管理者変更欄は空で保存
+                # 管理者欄は空
                 "admin_start": "",
                 "admin_end": "",
                 "admin_break1_start": "",
@@ -273,36 +285,34 @@ if mode != "admin":
         append_rows(rows_to_save)
         st.success(f"{len(rows_to_save)} 件 提出しました！")
 
-        # reset
         st.session_state.shift_rows = [0]
         st.session_state.next_row_id = 1
 
-    # スタッフに案内（URL分離）
-    st.info("スタッフ用URL例： `http://<host>:8501/?mode=staff`  （このURLだけ共有）")
-
+    st.info("スタッフ用URL： `...?mode=staff`（これだけ共有）")
     st.stop()
 
 # =============================
-# ADMIN PAGE (mode=admin) with password
+# ADMIN PAGE (mode=admin)
 # =============================
 st.subheader("🔒 管理者：集計・編集")
 
 if not ADMIN_PASSWORD:
-    st.warning("管理者パスワードが未設定です。環境変数 ADMIN_PASSWORD か secrets に設定してください。")
-else:
-    if "admin_ok" not in st.session_state:
-        st.session_state.admin_ok = False
+    st.error("管理者パスワードが未設定です。Streamlit Cloud の Secrets に ADMIN_PASSWORD を設定してください。")
+    st.stop()
 
-    if not st.session_state.admin_ok:
-        pw = st.text_input("管理者パスワード", type="password")
-        if st.button("ログイン"):
-            if pw == ADMIN_PASSWORD:
-                st.session_state.admin_ok = True
-                st.rerun()
-            else:
-                st.error("パスワードが違います")
-        st.info("管理者用URL例： `http://<host>:8501/?mode=admin`（このURLは共有しない）")
-        st.stop()
+if "admin_ok" not in st.session_state:
+    st.session_state.admin_ok = False
+
+if not st.session_state.admin_ok:
+    pw = st.text_input("管理者パスワード", type="password")
+    if st.button("ログイン", type="primary"):
+        if pw == ADMIN_PASSWORD:
+            st.session_state.admin_ok = True
+            st.rerun()
+        else:
+            st.error("パスワードが違います")
+    st.caption("管理者URL： `...?mode=admin`（スタッフに共有しない）")
+    st.stop()
 
 df = read_data()
 if df.empty:
@@ -327,13 +337,10 @@ if close_dt <= open_dt:
     st.error("表示の営業終了は営業開始より後にしてください")
     st.stop()
 
-# =============================
-# Admin edit controls (select one row to edit)
-# =============================
+# 変更・削除
 st.write("## 🛠 シフトの変更・削除（管理者）")
-st.caption("元の提出（orig_*）は残し、変更後（admin_*）を別欄に保存します。集計は admin_* が入っていればそれを優先します。")
+st.caption("元の提出（orig_*）は残し、変更後（admin_*）を別欄に保存。集計は admin_* が入っていればそれを優先。")
 
-# 表示用ラベル
 def label_row(r):
     o = f"{r['orig_start']}-{r['orig_end']}"
     a = ""
@@ -343,16 +350,13 @@ def label_row(r):
     delmark = " [削除]" if bool(r.get("admin_deleted", False)) else ""
     return f"{r['name']} / {r['date']} / {o}{a}{delmark}"
 
-# 選択
 day_df = day_df.sort_values(["name","orig_start"])
 options = day_df["id"].tolist()
 labels = {rid: label_row(day_df[day_df["id"]==rid].iloc[0].to_dict()) for rid in options}
-
 selected_id = st.selectbox("編集する提出を選択", options, format_func=lambda rid: labels.get(rid, rid))
-
 row = df[df["id"] == selected_id].iloc[0].to_dict()
 
-# 元（スタッフ入力）
+# 元
 st.write("### 元の提出（スタッフ入力）")
 st.write(f"- 名前：**{row['name']}**")
 st.write(f"- 日付：**{row['date']}**")
@@ -362,11 +366,9 @@ if (row.get("orig_note","") or "").strip():
 
 st.write("### 変更後（管理者が反映する内容）")
 
-# 現在の admin 値（なければ orig を初期値に）
 cur_start = parse_hm((row.get("admin_start","") or "").strip() or row["orig_start"])
 cur_end   = parse_hm((row.get("admin_end","") or "").strip() or row["orig_end"])
 
-# 休憩（最大2回・15分単位・自由）
 cur_b1s = parse_hm((row.get("admin_break1_start","") or "").strip())
 cur_b1e = parse_hm((row.get("admin_break1_end","") or "").strip())
 cur_b2s = parse_hm((row.get("admin_break2_start","") or "").strip())
@@ -378,7 +380,7 @@ with c1:
 with c2:
     new_end   = pick_15("終了（反映）", key="admin_new_end", default=cur_end or time(18,0))
 
-st.write("#### 休憩（反映：最大2回）")
+st.write("#### 休憩（反映：最大2回 / 15分単位）")
 bcol1, bcol2 = st.columns(2)
 with bcol1:
     use_b1 = st.checkbox("休憩1を使う", value=bool(cur_b1s and cur_b1e), key="admin_use_b1")
@@ -405,24 +407,15 @@ else:
 
 admin_note = st.text_input("管理者メモ（任意）", value=(row.get("admin_note","") or ""), key="admin_note")
 
-btn1, btn2, btn3, btn4 = st.columns([1,1,1,1])
+btn1, btn2, btn3, btn4 = st.columns(4)
 with btn1:
-    save_btn = st.button("💾 変更を保存", type="primary")
+    save_btn = st.button("💾 保存", type="primary")
 with btn2:
-    clear_btn = st.button("↩ 変更をクリア（元に戻す）")
+    clear_btn = st.button("↩ 変更クリア")
 with btn3:
-    del_btn = st.button("🗑 この提出を削除（非表示）")
+    del_btn = st.button("🗑 削除（非表示）")
 with btn4:
-    undel_btn = st.button("♻ 削除を取り消し")
-
-def update_row_in_df(df, rid, updates: dict):
-    idx = df.index[df["id"] == rid]
-    if len(idx) == 0:
-        return df
-    i = idx[0]
-    for k, v in updates.items():
-        df.at[i, k] = v
-    return df
+    undel_btn = st.button("♻ 削除取消")
 
 if save_btn:
     sdt = dt_of(target_day, new_start)
@@ -431,7 +424,6 @@ if save_btn:
         st.error("終了（反映）が開始より前/同じです")
         st.stop()
 
-    # break normalize + overlap
     breaks = []
     if use_b1:
         bs, be = clamp_break(sdt, edt, dt_of(target_day, nb1s), dt_of(target_day, nb1e))
@@ -503,20 +495,15 @@ if undel_btn:
 
 st.divider()
 
-# =============================
-# Output: Original vs Modified tables
-# =============================
+# 出力テーブル
 st.write("## 📋 出力：元の提出 と 変更後（反映）")
-
 day_df = df[df["date"] == target_day].copy()
 
-# 元の提出
 orig_out = day_df[["id","name","date","orig_start","orig_end","orig_note","submitted_at"]].copy()
 orig_out = orig_out.sort_values(["name","orig_start"])
 st.write("### 元の提出（スタッフ入力）")
 st.dataframe(orig_out, use_container_width=True)
 
-# 変更後（反映）: effective 値 + 休憩 + 削除状態
 def build_effective(df_day: pd.DataFrame):
     rows = []
     for _, r in df_day.iterrows():
@@ -541,8 +528,7 @@ def build_effective(df_day: pd.DataFrame):
             "deleted": bool(r.get("admin_deleted", False)),
             "admin_updated_at": (r.get("admin_updated_at","") or "").strip(),
         })
-    out = pd.DataFrame(rows).sort_values(["name","effective_start"])
-    return out
+    return pd.DataFrame(rows).sort_values(["name","effective_start"])
 
 eff_out = build_effective(day_df)
 st.write("### 変更後（反映用：管理者が決めた時間・休憩）")
@@ -550,16 +536,14 @@ st.dataframe(eff_out, use_container_width=True)
 
 st.divider()
 
-# =============================
-# Aggregation using effective schedule (skip deleted)
-# =============================
+# 集計（反映データ）
 st.write("## 📊 集計（反映データで計算）")
 
-# build staff objects
 staff = []
 for _, r in day_df.iterrows():
     if bool(r.get("admin_deleted", False)):
         continue
+
     eff_start = effective_time(r, "admin_start", "orig_start")
     eff_end   = effective_time(r, "admin_end", "orig_end")
     sdt = dt_of(target_day, parse_hm(eff_start))
@@ -590,7 +574,7 @@ for _, r in day_df.iterrows():
         "segs": segs,
     })
 
-# 指定時刻：人数＋名前
+# 指定時刻の人数＋名前
 c1, c2 = st.columns([1, 2])
 with c1:
     q_time = st.time_input("この時刻に働いている人", value=open_time, key="agg_qtime")
@@ -648,7 +632,7 @@ for i, p in enumerate(staff):
         w = minutes_from(open_dt, b) - x0
         if w > 0:
             bars.append((x0, w))
-    ax2.broken_barh(bars, (y, y_height), facecolors="#7fbf00", edgecolors="none", alpha=0.85)
+    ax2.broken_barh(bars, (y, y_height), alpha=0.85)
 
     ax2.text(minutes_from(open_dt, p["start_dt"]), y + y_height + 1,
              f"{p['start_dt'].strftime('%H:%M')}-{p['end_dt'].strftime('%H:%M')}",
@@ -682,4 +666,5 @@ ax2.grid(True, axis="x", alpha=0.25)
 ax2.set_title(f"Gantt ({target_day.isoformat()})")
 st.pyplot(fig2)
 
-st.info("管理者URL例： `http://<host>:8501/?mode=admin`（パスワード必須）")
+st.caption("スタッフ用URL： `...?mode=staff` ／ 管理者URL： `...?mode=admin`")
+
