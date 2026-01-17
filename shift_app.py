@@ -43,50 +43,40 @@ def hm(t: time) -> str:
     return t.strftime("%H:%M")
 
 def parse_hm(s):
-    """
-    CSV等から来る時刻を安全に HH:MM に変換。
-    '10:00', '10:00:00', '9:00', nan, '', None, '10', '10.0' を吸収。
-    失敗したら None を返す（アプリを落とさない）。
-    """
+    """CSV等から来る時刻を安全に HH:MM に変換。失敗は None。"""
     if s is None:
         return None
-    # pandas NaN
     try:
-        if isinstance(s, float) and pd.isna(s):
+        if pd.isna(s):
             return None
     except Exception:
         pass
 
     s = str(s).strip()
-    if not s or s.lower() in ("nan", "none"):
+    if not s:
+        return None
+    if s.lower() in ("nan", "none", "nat"):
         return None
 
-    # HH:MM:SS -> HH:MM
+    # "HH:MM:SS" -> "HH:MM"
     if re.match(r"^\d{1,2}:\d{2}:\d{2}$", s):
         s = s[:5]
 
-    # H:MM / HH:MM
     if re.match(r"^\d{1,2}:\d{2}$", s):
-        parts = s.split(":")
-        h = int(parts[0])
-        m = int(parts[1])
-        if 0 <= h <= 23 and 0 <= m <= 59:
-            return time(h, m)
-        return None
-
-    # "10" / "10.0" -> 10:00 と解釈（不要なら消してOK）
-    try:
-        f = float(s)
-        h = int(f)
-        if 0 <= h <= 23:
-            return time(h, 0)
-    except Exception:
-        pass
+        h, m = s.split(":")
+        s = f"{int(h):02d}:{int(m):02d}"
+        try:
+            return datetime.strptime(s, "%H:%M").time()
+        except Exception:
+            return None
 
     return None
 
 def dt_of(d: date, t: time) -> datetime:
     return datetime.combine(d, t)
+
+def minutes_from(base: datetime, dt: datetime) -> float:
+    return (dt - base).total_seconds() / 60.0
 
 def clamp_break(start_dt, end_dt, b_start, b_end):
     if b_start is None or b_end is None:
@@ -122,9 +112,6 @@ def working_at_time(segs, qdt):
 def working_in_slot(segs, s0, s1):
     return any((a < s1) and (b > s0) for (a, b) in segs)
 
-def minutes_from(base: datetime, dt: datetime) -> float:
-    return (dt - base).total_seconds() / 60.0
-
 def build_slots(open_dt, close_dt, step_min):
     t = open_dt
     step = timedelta(minutes=step_min)
@@ -141,7 +128,7 @@ def pick_15(label, key, default=time(9, 0)):
     return st.selectbox(label, TIMES_15, index=idx, key=key, format_func=lambda x: x.strftime("%H:%M"))
 
 # ============================================================
-# CSV read/write（古いCSVでも落ちない：列補完 + 型整形）
+# CSV read/write（古いCSVでも落ちない + 列補完）
 # ============================================================
 BASE_COLS = [
     "id","submitted_at",
@@ -160,36 +147,25 @@ def read_data():
 
     df = pd.read_csv(CSV_PATH)
 
-    # 足りない列を補完
+    # 足りない列を補完（古いCSV対策）
     for c in BASE_COLS:
         if c not in df.columns:
             df[c] = "" if c != "admin_deleted" else False
 
-    # date 整形（失敗しても落とさない）
-    try:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-    except Exception:
-        df["date"] = pd.NaT
+    # 欠損は基本空文字へ（admin_deletedだけ別処理）
+    df = df.fillna("")
 
-    # admin_deleted 整形
-    try:
-        df["admin_deleted"] = df["admin_deleted"].fillna(False).astype(bool)
-    except Exception:
-        df["admin_deleted"] = False
+    # date
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
 
-    # NaT の行は落ちるので除外（念のため）
-    df = df[df["date"].notna()].copy()
+    # admin_deleted
+    df["admin_deleted"] = df["admin_deleted"].astype(str).str.lower().isin(["true", "1", "yes"])
     return df
 
 def save_data(df: pd.DataFrame):
     df2 = df.copy()
     df2["date"] = df2["date"].astype(str)
     df2.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-
-def append_rows(rows: list[dict]):
-    df = read_data()
-    df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
-    save_data(df)
 
 def update_row_in_df(df, rid, updates: dict):
     idx = df.index[df["id"] == rid]
@@ -201,28 +177,46 @@ def update_row_in_df(df, rid, updates: dict):
     return df
 
 def effective_time(row, col_admin, col_orig):
-    v = row.get(col_admin, "")
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        v = ""
-    v = str(v).strip()
-    if v:
+    v = str(row.get(col_admin, "") or "").strip()
+    if v and v.lower() not in ("nan", "none"):
         return v
-    o = row.get(col_orig, "")
-    if o is None or (isinstance(o, float) and pd.isna(o)):
-        o = ""
-    return str(o).strip()
+    o = str(row.get(col_orig, "") or "").strip()
+    return o
 
 def is_overridden(row):
     def s(x):
-        if x is None or (isinstance(x, float) and pd.isna(x)):
-            return ""
-        return str(x).strip()
+        x = str(x or "").strip()
+        return "" if x.lower() in ("nan", "none") else x
     return bool(
         s(row.get("admin_start")) or s(row.get("admin_end")) or
         s(row.get("admin_break1_start")) or s(row.get("admin_break1_end")) or
         s(row.get("admin_break2_start")) or s(row.get("admin_break2_end")) or
-        s(row.get("admin_note"))
+        s(row.get("admin_note")) or bool(row.get("admin_deleted", False))
     )
+
+def upsert_staff_submission(rows: list[dict]):
+    """
+    ★要件：同じ「日付 + 名前」の提出は上書き（最新1件だけ残す）
+    今回は提出画面は「その人のその日の希望は1つ」とみなして upsert します。
+    """
+    df = read_data()
+
+    for r in rows:
+        key_name = (r.get("name") or "").strip()
+        key_date = (r.get("date") or "").strip()  # ISO文字列
+        if not key_name or not key_date:
+            continue
+
+        # 同じ name+date を削除（過去分）
+        if not df.empty:
+            # df["date"] は date 型なので比較用に str でも date でもOK
+            df = df[~((df["name"].astype(str).str.strip() == key_name) &
+                      (df["date"].astype(str) == key_date))]
+
+        # 追加
+        df = pd.concat([df, pd.DataFrame([r])], ignore_index=True)
+
+    save_data(df)
 
 # ============================================================
 # UI
@@ -234,7 +228,7 @@ st.title("🗓 シフト管理")
 # ============================================================
 if mode != "admin":
     st.subheader("✍️ スタッフ：シフト提出")
-    st.caption("※スタッフにはこのURL（?mode=staff）だけ共有。管理者ページは別URLです。")
+    st.caption("※このURL（?mode=staff）だけ共有する想定です。")
 
     if "shift_rows" not in st.session_state:
         st.session_state.shift_rows = [0]
@@ -268,7 +262,7 @@ if mode != "admin":
             d = st.date_input("日付", value=date.today(), key=f"d_{rid}")
             start_t = pick_15("開始（15分単位）", key=f"start_{rid}", default=time(9,0))
             end_t   = pick_15("終了（15分単位）", key=f"end_{rid}", default=time(18,0))
-            st.text_input("この行のメモ（任意）", key=f"note_{rid}", placeholder="例：15時から用事")
+            note_each = st.text_input("この行のメモ（任意）", key=f"note_{rid}", placeholder="例：15時から用事")
 
     if rows_to_remove:
         st.session_state.shift_rows = [r for r in st.session_state.shift_rows if r not in rows_to_remove]
@@ -279,6 +273,8 @@ if mode != "admin":
 
     st.divider()
 
+    st.warning("※同じ『日付 + 名前』で再提出すると、前の提出は上書きされます。")
+
     if st.button("✅ まとめて送信", type="primary"):
         if not staff_name.strip():
             st.error("名前を入力してね")
@@ -286,6 +282,9 @@ if mode != "admin":
 
         errors = []
         rows_to_save = []
+        # ★ upsert 仕様なので「1人が同日に複数行」を許すと矛盾する。
+        # ここでは「同日を複数行で出す」はOK（ただし同じ日付が複数行なら最後が残る）
+        # 使い方としては「日付ごとに1行」推奨。
         for rid in st.session_state.shift_rows:
             d = st.session_state.get(f"d_{rid}")
             start_t = st.session_state.get(f"start_{rid}")
@@ -309,8 +308,6 @@ if mode != "admin":
                 "orig_start": hm(start_t),
                 "orig_end": hm(end_t),
                 "orig_note": merged_note,
-
-                # 管理者欄は空で保存
                 "admin_start": "",
                 "admin_end": "",
                 "admin_break1_start": "",
@@ -326,8 +323,10 @@ if mode != "admin":
             st.error("入力エラーがあります：\n- " + "\n- ".join(errors))
             st.stop()
 
-        append_rows(rows_to_save)
-        st.success(f"{len(rows_to_save)} 件 提出しました！")
+        # ★同じ日付+名前は上書き
+        upsert_staff_submission(rows_to_save)
+
+        st.success(f"{len(rows_to_save)} 件 提出しました！（同日同名は上書き）")
 
         st.session_state.shift_rows = [0]
         st.session_state.next_row_id = 1
@@ -341,7 +340,7 @@ if mode != "admin":
 st.subheader("🔒 管理者：集計・編集")
 
 if not ADMIN_PASSWORD:
-    st.error("管理者パスワードが未設定。Secrets に `ADMIN_PASSWORD = \"...\"` を設定してね。")
+    st.error("管理者パスワードが未設定です。Secrets に `ADMIN_PASSWORD = \"...\"` を設定してください。")
     st.stop()
 
 if "admin_ok" not in st.session_state:
@@ -359,18 +358,20 @@ if not st.session_state.admin_ok:
     st.stop()
 
 # ============================================================
-# ADMIN MAIN
+# Load data / select date
 # ============================================================
 df = read_data()
+df = df[df["date"].notna()].copy()
+
 if df.empty:
     st.info("まだ提出がありません。")
     st.stop()
 
-# 日付選択
 dates = sorted(df["date"].unique())
-target_day = st.selectbox("日付を選択", dates, index=len(dates)-1)
+target_day = st.selectbox("日付を選択（その日だけ集計）", dates, index=len(dates)-1)
 
-day_df_all = df[df["date"] == target_day].copy()
+day_df = df[df["date"] == target_day].copy()
+day_df = day_df.sort_values(["name", "orig_start"]).reset_index(drop=True)
 
 with st.sidebar:
     st.subheader("表示範囲")
@@ -381,43 +382,42 @@ with st.sidebar:
 open_dt = dt_of(target_day, open_time)
 close_dt = dt_of(target_day, close_time)
 if close_dt <= open_dt:
-    st.error("営業終了は営業開始より後にしてね")
+    st.error("表示の営業終了は営業開始より後にしてください")
     st.stop()
 
-# -----------------------------
-# 変更・削除（管理者）
-# -----------------------------
+# ============================================================
+# Admin edit controls (select one row to edit)
+# ============================================================
 st.write("## 🛠 シフトの変更・削除（管理者）")
-st.caption("元の提出（orig_*）は残し、変更後（admin_*）を別欄に保存。集計は admin_* が入っていれば優先。")
+st.caption("元の提出（orig_*）は残し、変更後（admin_*）を別欄に保存します。集計は admin_* が入っていればそれを優先します。")
 
 def label_row(r):
-    o = f"{r.get('orig_start','')}-{r.get('orig_end','')}"
+    o = f"{r['orig_start']}-{r['orig_end']}"
     a = ""
     if is_overridden(r) or bool(r.get("admin_deleted", False)):
-        ae_s = (str(r.get("admin_start","") or "").strip() or str(r.get("orig_start","") or "").strip())
-        ae_e = (str(r.get("admin_end","") or "").strip() or str(r.get("orig_end","") or "").strip())
-        a = f" → {ae_s}-{ae_e}"
+        ae_start = (str(r.get("admin_start","") or "").strip() or r["orig_start"])
+        ae_end   = (str(r.get("admin_end","") or "").strip() or r["orig_end"])
+        a = f" → {ae_start}-{ae_end}"
     delmark = " [削除]" if bool(r.get("admin_deleted", False)) else ""
-    return f"{r.get('name','')} / {r.get('date')} / {o}{a}{delmark}"
+    return f"{r['name']} / {r['date']} / {o}{a}{delmark}"
 
-day_df_all = day_df_all.sort_values(["name","orig_start"])
-options = day_df_all["id"].tolist()
-labels = {rid: label_row(day_df_all[day_df_all["id"]==rid].iloc[0].to_dict()) for rid in options}
-
+options = day_df["id"].tolist()
+labels = {rid: label_row(day_df[day_df["id"]==rid].iloc[0].to_dict()) for rid in options}
 selected_id = st.selectbox("編集する提出を選択", options, format_func=lambda rid: labels.get(rid, rid))
+
 row = df[df["id"] == selected_id].iloc[0].to_dict()
 
 # 元（スタッフ入力）
 st.write("### 元の提出（スタッフ入力）")
-st.write(f"- 名前：**{row.get('name','')}**")
-st.write(f"- 日付：**{row.get('date')}**")
-st.write(f"- 時間：**{row.get('orig_start','')}–{row.get('orig_end','')}**")
-if (str(row.get("orig_note","") or "").strip()):
-    st.write(f"- メモ：{row.get('orig_note','')}")
+st.write(f"- 名前：**{row['name']}**")
+st.write(f"- 日付：**{row['date']}**")
+st.write(f"- 時間：**{row['orig_start']}–{row['orig_end']}**")
+orig_note = str(row.get("orig_note","") or "").strip()
+if orig_note:
+    st.write(f"- メモ：{orig_note}")
 
 st.write("### 変更後（管理者が反映する内容）")
 
-# ★ここがValueErrorの場所だったので安全化（Noneならデフォルト）
 cur_start = parse_hm(row.get("admin_start")) or parse_hm(row.get("orig_start")) or time(9,0)
 cur_end   = parse_hm(row.get("admin_end"))   or parse_hm(row.get("orig_end"))   or time(18,0)
 
@@ -432,7 +432,7 @@ with c1:
 with c2:
     new_end   = pick_15("終了（反映）", key="admin_new_end", default=cur_end)
 
-st.write("#### 休憩（反映：最大2回・15分単位）")
+st.write("#### 休憩（反映：最大2回・15分単位・自由）")
 bcol1, bcol2 = st.columns(2)
 with bcol1:
     use_b1 = st.checkbox("休憩1を使う", value=bool(cur_b1s and cur_b1e), key="admin_use_b1")
@@ -457,7 +457,8 @@ if use_b2:
 else:
     nb2s = nb2e = None
 
-admin_note = st.text_input("管理者メモ（任意）", value=str(row.get("admin_note","") or ""), key="admin_note")
+admin_note_val = str(row.get("admin_note","") or "")
+admin_note = st.text_input("管理者メモ（任意）", value=admin_note_val, key="admin_note")
 
 btn1, btn2, btn3, btn4 = st.columns([1,1,1,1])
 with btn1:
@@ -468,12 +469,6 @@ with btn3:
     del_btn = st.button("🗑 この提出を削除（非表示）")
 with btn4:
     undel_btn = st.button("♻ 削除を取り消し")
-
-def overlap_breaks(breaks):
-    if len(breaks) <= 1:
-        return False
-    (a1, a2), (b1, b2) = sorted(breaks, key=lambda x: x[0])
-    return not (a2 <= b1)
 
 if save_btn:
     sdt = dt_of(target_day, new_start)
@@ -496,9 +491,11 @@ if save_btn:
             st.stop()
         breaks.append((bs, be))
 
-    if overlap_breaks(breaks):
-        st.error("休憩1と休憩2が重なっています。ずらしてね。")
-        st.stop()
+    if len(breaks) == 2:
+        (a1, a2), (b1, b2) = sorted(breaks, key=lambda x: x[0])
+        if not (a2 <= b1):
+            st.error("休憩1と休憩2が重なっています。ずらしてください。")
+            st.stop()
 
     df = update_row_in_df(df, selected_id, {
         "admin_start": hm(new_start),
@@ -552,11 +549,12 @@ if undel_btn:
 st.divider()
 
 # ============================================================
-# 出力：元の提出 vs 変更後
+# Output tables（orig と effective）
 # ============================================================
 st.write("## 📋 出力：元の提出 と 変更後（反映）")
 
 day_df = df[df["date"] == target_day].copy()
+day_df = day_df[~day_df["admin_deleted"]].copy()
 
 orig_out = day_df[["id","name","date","orig_start","orig_end","orig_note","submitted_at"]].copy()
 orig_out = orig_out.sort_values(["name","orig_start"])
@@ -568,6 +566,7 @@ def build_effective(df_day: pd.DataFrame):
     for _, r in df_day.iterrows():
         eff_start = effective_time(r, "admin_start", "orig_start")
         eff_end   = effective_time(r, "admin_end", "orig_end")
+
         b1 = ""
         if str(r.get("admin_break1_start","") or "").strip() and str(r.get("admin_break1_end","") or "").strip():
             b1 = f"{r['admin_break1_start']}-{r['admin_break1_end']}"
@@ -575,6 +574,8 @@ def build_effective(df_day: pd.DataFrame):
         if str(r.get("admin_break2_start","") or "").strip() and str(r.get("admin_break2_end","") or "").strip():
             b2 = f"{r['admin_break2_start']}-{r['admin_break2_end']}"
         btxt = " / ".join([x for x in [b1, b2] if x])
+
+        note = str(r.get("admin_note","") or "").strip()
         rows.append({
             "id": r["id"],
             "name": r["name"],
@@ -582,8 +583,7 @@ def build_effective(df_day: pd.DataFrame):
             "effective_start": eff_start,
             "effective_end": eff_end,
             "breaks": btxt,
-            "admin_note": str(r.get("admin_note","") or "").strip(),
-            "deleted": bool(r.get("admin_deleted", False)),
+            "admin_note": note,
             "admin_updated_at": str(r.get("admin_updated_at","") or "").strip(),
         })
     out = pd.DataFrame(rows).sort_values(["name","effective_start"])
@@ -596,26 +596,23 @@ st.dataframe(eff_out, use_container_width=True)
 st.divider()
 
 # ============================================================
-# 集計（反映データで計算）
+# Aggregation & graphs（選んだ日だけ）
 # ============================================================
-st.write("## 📊 集計（反映データで計算）")
+st.write(f"## 📊 集計（{target_day.isoformat()} のみ / 反映データで計算）")
 
-# staff objects
+# build staff objects
 staff = []
 for _, r in day_df.iterrows():
-    if bool(r.get("admin_deleted", False)):
-        continue
-
     eff_start = effective_time(r, "admin_start", "orig_start")
     eff_end   = effective_time(r, "admin_end", "orig_end")
-    stt = parse_hm(eff_start)
-    ett = parse_hm(eff_end)
-    if (stt is None) or (ett is None):
-        # 時刻がおかしい行はスキップ（落とさない）
+
+    st_t = parse_hm(eff_start)
+    en_t = parse_hm(eff_end)
+    if st_t is None or en_t is None:
         continue
 
-    sdt = dt_of(target_day, stt)
-    edt = dt_of(target_day, ett)
+    sdt = dt_of(target_day, st_t)
+    edt = dt_of(target_day, en_t)
     if edt <= sdt:
         continue
 
@@ -634,24 +631,23 @@ for _, r in day_df.iterrows():
         if bs and be:
             breaks.append((bs, be))
 
-    # 休憩が重なってても落とさない（重なりは編集時に防ぐが、念のため）
-    breaks = sorted(breaks, key=lambda x: x[0])
-
     segs = segments_minus_breaks(sdt, edt, breaks)
 
+    note = str(r.get("orig_note","") or "").strip()
     staff.append({
         "name": r["name"],
         "start_dt": sdt,
         "end_dt": edt,
         "breaks": breaks,
         "segs": segs,
+        "note": note,
     })
 
 if not staff:
-    st.info("この日付の有効な勤務データがありません（時刻が不正な行があるかも）。")
+    st.info("この日の有効な提出がありません。")
     st.stop()
 
-# 指定時刻：人数＋名前
+# ---- 指定時刻：人数＋名前
 c1, c2 = st.columns([1, 2])
 with c1:
     q_time = st.time_input("この時刻に働いている人", value=open_time, key="agg_qtime")
@@ -661,7 +657,7 @@ with c2:
     st.metric("人数", f"{len(active)} 人")
     st.write("**勤務中:** " + (" / ".join(active) if active else "なし"))
 
-# 時間帯人数 + 名前（表+グラフ）
+# ---- 時間帯人数 + 名前（表+折れ線）
 slots = build_slots(open_dt, close_dt, step_min)
 labels = [t.strftime("%H:%M") for t in slots]
 step = timedelta(minutes=step_min)
@@ -692,13 +688,15 @@ with c4:
             tick.set_visible(False)
     st.pyplot(fig1)
 
-# ガント（休憩は抜ける）
-st.write("### 📊 ガント（反映データ + 休憩）")
-fig2, ax2 = plt.subplots(figsize=(12, max(3, 0.6 * len(staff))))
+# ---- ガント（要求仕様：横=時間、縦=名前、棒=その人の時間、メモ空なら表示しない）
+st.write("### 📊 その日のシフト図（横=時間 / 縦=名前）")
+staff_sorted = sorted(staff, key=lambda x: (x["name"], x["start_dt"]))
+
+fig2, ax2 = plt.subplots(figsize=(12, max(3, 0.65 * len(staff_sorted))))
 y_height, y_gap = 8, 4
 yticks, ylabels = [], []
 
-for i, p in enumerate(staff):
+for i, p in enumerate(staff_sorted):
     y = i * (y_height + y_gap)
     yticks.append(y + y_height/2)
     ylabels.append(p["name"])
@@ -709,17 +707,35 @@ for i, p in enumerate(staff):
         w = minutes_from(open_dt, b) - x0
         if w > 0:
             bars.append((x0, w))
+
     ax2.broken_barh(bars, (y, y_height), alpha=0.85)
 
-    ax2.text(minutes_from(open_dt, p["start_dt"]), y + y_height + 1,
-             f"{p['start_dt'].strftime('%H:%M')}-{p['end_dt'].strftime('%H:%M')}",
-             va="bottom", ha="left", fontsize=9)
+    # 時間ラベル
+    ax2.text(
+        minutes_from(open_dt, p["start_dt"]),
+        y + y_height + 1,
+        f"{p['start_dt'].strftime('%H:%M')}-{p['end_dt'].strftime('%H:%M')}",
+        va="bottom", ha="left", fontsize=9
+    )
 
+    # 休憩ラベル（あれば）
     if p["breaks"]:
         btxt = " / ".join([f"{bs.strftime('%H:%M')}-{be.strftime('%H:%M')}" for (bs, be) in p["breaks"]])
-        ax2.text(minutes_from(open_dt, p["end_dt"]), y + y_height + 1,
-                 f" (休 {btxt})",
-                 va="bottom", ha="left", fontsize=9)
+        ax2.text(
+            minutes_from(open_dt, p["end_dt"]),
+            y + y_height + 1,
+            f" (休 {btxt})",
+            va="bottom", ha="left", fontsize=9
+        )
+
+    # メモ（空なら出さない）
+    note = (p.get("note") or "").strip()
+    if note:
+        ax2.text(
+            0, y - 1,
+            f"メモ: {note}",
+            va="top", ha="left", fontsize=8
+        )
 
 total_min = (close_dt - open_dt).total_seconds() / 60
 ax2.set_xlim(0, total_min)
@@ -740,7 +756,9 @@ ax2.set_xlabel("Hour")
 ax2.set_yticks(yticks)
 ax2.set_yticklabels(ylabels)
 ax2.grid(True, axis="x", alpha=0.25)
-ax2.set_title(f"Gantt ({target_day.isoformat()})")
+ax2.set_title(f"Shift chart ({target_day.isoformat()})")
 st.pyplot(fig2)
+
+st.info("管理者URL例： `https://<your-app>.streamlit.app/?mode=admin`（パスワード必須）")
 
 st.info("管理者URL例： `https://<your-app>.streamlit.app/?mode=admin`（共有しない）")
