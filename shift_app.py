@@ -5,6 +5,25 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from datetime import datetime, date, time, timedelta
 
+# ===== 管理者認証 =====
+query = st.experimental_get_query_params()
+mode = query.get("mode", ["staff"])[0]
+
+def require_admin():
+    if "admin_authed" not in st.session_state:
+        st.session_state.admin_authed = False
+
+    if not st.session_state.admin_authed:
+        pw = st.text_input("管理者パスワード", type="password")
+        if pw == st.secrets["ADMIN_PASSWORD"]:
+            st.session_state.admin_authed = True
+            st.experimental_rerun()
+        else:
+            st.stop()
+
+if mode == "admin":
+    require_admin()
+
 # =============================
 # Storage
 # =============================
