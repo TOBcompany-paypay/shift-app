@@ -294,7 +294,7 @@ if not st.session_state.admin_ok:
             st.rerun()
         else:
             st.error("パスワードが違います")
-    st.info("管理者用URL： `https://<あなたのアプリ>.streamlit.app/?mode=admin`（共有しない）")
+    st.info("管理者用URL： `https://shift-app-nkyl4zuhzrjejz8zxxlh3a.streamlit.app/?mode=admin`（共有しない）")
     st.stop()
 
 # ============================================================
@@ -355,6 +355,16 @@ valid = shift_df[
     (shift_df["start_norm"] != "") &
     (shift_df["end_norm"] != "")
 ].copy()
+
+st.write("=== 無効行（落ちた原因）===")
+bad = shift_df.copy()
+bad["bad_reason"] = ""
+bad.loc[bad["date_norm"]=="", "bad_reason"] += " date"
+bad.loc[bad["name_norm"]=="", "bad_reason"] += " name"
+bad.loc[bad["start_norm"]=="", "bad_reason"] += " start"
+bad.loc[bad["end_norm"]=="", "bad_reason"] += " end"
+st.dataframe(bad[bad["bad_reason"]!=""][["date","name","start","end","store","note","bad_reason"]], use_container_width=True)
+
 
 st.caption(f"全行: {len(shift_df)} / 有効行(集計対象): {len(valid)}")
 if len(valid) == 0:
