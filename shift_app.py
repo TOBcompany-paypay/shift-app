@@ -76,6 +76,7 @@ def hm(t: time) -> str:
     return t.strftime("%H:%M")
 
 def parse_hm(s):
+    """'HH:MM' 以外は None にする（nan/空/壊れ値は確実に落とす）"""
     if s is None:
         return None
     if isinstance(s, float) and pd.isna(s):
@@ -83,6 +84,9 @@ def parse_hm(s):
     s = str(s).strip()
     if not s or s.lower() == "nan":
         return None
+    # 余計な秒が来たら切る（"09:00:00" -> "09:00"）
+    if len(s) >= 5 and s[2] == ":":
+        s = s[:5]
     try:
         return datetime.strptime(s, "%H:%M").time()
     except Exception:
@@ -112,7 +116,6 @@ def normalize_store(x) -> str:
         return "どちらでも"
     if s in STORE_OPTIONS:
         return s
-    # 揺れ対策（英語など）
     low = s.lower()
     if "sub" in low:
         return "サブウェイ"
@@ -123,17 +126,31 @@ def normalize_store(x) -> str:
 def display_name(name: str, store: str) -> str:
     return f"{name}{STORE_LABEL.get(store, '(SH)')}"
 
+def normalize_date_str(x) -> str:
+    """
+    date が '2026-01-18', '2026/01/18', '2026-01-18 00:00:00' みたいに来ても
+    'YYYY-MM-DD' に統一。無理なら ''。
+    """
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return ""
+    s = str(x).strip()
+    if not s or s.lower() == "nan":
+        return ""
+    # まず pandas に投げる
+    dt = pd.to_datetime(s, errors="coerce")
+    if pd.isna(dt):
+        return ""
+    return dt.date().isoformat()
+
 # ============================================================
-# Load allowed dates
+# Load allowed dates (as date objects)
 # ============================================================
 allowed_df = read_csv_safe(ALLOWED_CSV, ["date"])
 allowed_dates = []
 for x in allowed_df["date"].tolist():
-    try:
-        d = datetime.strptime(str(x), "%Y-%m-%d").date()
-        allowed_dates.append(d)
-    except Exception:
-        pass
+    ds = normalize_date_str(x)
+    if ds:
+        allowed_dates.append(datetime.strptime(ds, "%Y-%m-%d").date())
 allowed_dates = sorted(set(allowed_dates))
 
 # ============================================================
@@ -152,7 +169,6 @@ if mode != "admin":
         st.warning("提出可能日（試合日）が未設定です。管理者に連絡してください。")
         st.stop()
 
-    # dynamic rows
     if "rows" not in st.session_state:
         st.session_state.rows = [0]
         st.session_state.next_id = 1
@@ -215,7 +231,7 @@ if mode != "admin":
 
         df = read_csv_safe(SHIFT_CSV, ["id","submitted_at","date","name","start","end","store","note"])
 
-        # 同日・同名は上書き（行ごとに）
+        # 行ごとに (date,name) を上書き
         for rid in st.session_state.rows:
             d = st.session_state.get(f"d_{rid}")
             s = st.session_state.get(f"s_{rid}")
@@ -230,13 +246,18 @@ if mode != "admin":
                 st.error("終了が開始より前/同じの行があります")
                 st.stop()
 
-            # remove existing (date,name)
-            df = df[~((df["date"].astype(str) == str(d)) & (df["name"].astype(str) == name.strip()))]
+            date_str = d.isoformat()
+
+            # 既存を削除して上書き
+            df["date_norm"] = df["date"].apply(normalize_date_str)
+            df["name_norm"] = df["name"].astype(str).str.strip()
+            df = df[~((df["date_norm"] == date_str) & (df["name_norm"] == name.strip()))]
+            df = df.drop(columns=["date_norm","name_norm"], errors="ignore")
 
             df.loc[len(df)] = [
                 str(uuid.uuid4()),
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                str(d),
+                date_str,
                 name.strip(),
                 hm(s),
                 hm(e),
@@ -306,25 +327,53 @@ with colB:
 st.divider()
 
 # ============================================================
-# Admin: Load shifts and aggregate
+# Admin: Load shifts (robust)
 # ============================================================
+st.write("## 📥 提出データ（読み込み状況）")
+
 shift_df = read_csv_safe(SHIFT_CSV, ["id","submitted_at","date","name","start","end","store","note"])
 if shift_df.empty:
     st.info("まだ提出がありません。")
     st.stop()
 
-shift_df["date"] = pd.to_datetime(shift_df["date"], errors="coerce").dt.date
-shift_df = shift_df.dropna(subset=["date"])
+# 正規化
+shift_df["date_norm"] = shift_df["date"].apply(normalize_date_str)
+shift_df["name_norm"] = shift_df["name"].astype(str).str.strip()
+shift_df["start_norm"] = shift_df["start"].apply(lambda x: hm(parse_hm(x)) if parse_hm(x) else "")
+shift_df["end_norm"] = shift_df["end"].apply(lambda x: hm(parse_hm(x)) if parse_hm(x) else "")
+shift_df["store_norm"] = shift_df["store"].apply(normalize_store)
+shift_df["note_norm"] = shift_df["note"].apply(lambda x: "" if (x is None or (isinstance(x, float) and pd.isna(x))) else str(x).strip())
+shift_df["submitted_at_dt"] = pd.to_datetime(shift_df["submitted_at"], errors="coerce")
 
-dates_have = sorted(shift_df["date"].unique())
-target_day = st.selectbox("集計する日付", dates_have, index=len(dates_have)-1)
+# 有効行だけ抽出
+valid = shift_df[
+    (shift_df["date_norm"] != "") &
+    (shift_df["name_norm"] != "") &
+    (shift_df["start_norm"] != "") &
+    (shift_df["end_norm"] != "")
+].copy()
 
-day_df = shift_df[shift_df["date"] == target_day].copy()
+st.caption(f"全行: {len(shift_df)} / 有効行(集計対象): {len(valid)}")
+if len(valid) == 0:
+    st.error("有効な提出が0件です。date/start/end が壊れている可能性があります。")
+    st.dataframe(shift_df[["date","name","start","end","store","note"]].head(50), use_container_width=True)
+    st.stop()
+
+# 日付候補
+dates_have = sorted(valid["date_norm"].unique())
+target_date_str = st.selectbox("集計する日付", dates_have, index=len(dates_have)-1)
+target_day = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+
+day_df = valid[valid["date_norm"] == target_date_str].copy()
 if day_df.empty:
     st.info("この日付の提出はありません。")
     st.stop()
 
-# display range
+# 同日・同名は最新（submitted_atがNaTでも最後の行を採用）
+day_df = day_df.sort_values(["submitted_at_dt"], na_position="first")
+day_df = day_df.drop_duplicates(subset=["date_norm","name_norm"], keep="last")
+
+# 表示範囲
 with st.sidebar:
     st.subheader("表示範囲")
     open_time = st.time_input("表示開始", value=time(7, 0))
@@ -337,31 +386,25 @@ if close_dt <= open_dt:
     st.error("表示終了は表示開始より後にしてください")
     st.stop()
 
-# Upsert by (date,name) for admin view (latest submitted_at wins)
-day_df["submitted_at_dt"] = pd.to_datetime(day_df["submitted_at"], errors="coerce")
-day_df = day_df.sort_values("submitted_at_dt").drop_duplicates(subset=["date", "name"], keep="last")
-
+# people 作成
 people = []
+dropped = 0
 for _, r in day_df.iterrows():
-    name = str(r.get("name", "")).strip()
-    if not name:
-        continue
-
-    st_t = parse_hm(r.get("start"))
-    en_t = parse_hm(r.get("end"))
+    st_t = parse_hm(r["start_norm"])
+    en_t = parse_hm(r["end_norm"])
     if st_t is None or en_t is None:
+        dropped += 1
         continue
-
     sdt = dt_of(target_day, st_t)
     edt = dt_of(target_day, en_t)
     if edt <= sdt:
+        dropped += 1
         continue
 
-    store = normalize_store(r.get("store"))
-    note = (r.get("note", "") or "")
-    note = "" if (isinstance(note, float) and pd.isna(note)) else str(note).strip()
-
     minutes = (edt - sdt).total_seconds() / 60.0
+    store = r["store_norm"]
+    name = r["name_norm"]
+    note = r["note_norm"]
 
     people.append({
         "name": name,
@@ -374,6 +417,11 @@ for _, r in day_df.iterrows():
     })
 
 people = sorted(people, key=lambda x: (x["start_dt"], x["name"]))
+
+st.caption(f"この日の人数: {len(people)}（不正で除外: {dropped}）")
+st.dataframe(day_df[["name_norm","date_norm","start_norm","end_norm","store_norm","note_norm","submitted_at"]], use_container_width=True)
+
+st.divider()
 
 # ============================================================
 # Headcount (time slot) + table + graph
@@ -424,7 +472,7 @@ y_height, y_gap = 8, 4
 yticks, ylabels = [], []
 
 total_min = (close_dt - open_dt).total_seconds() / 60.0
-ax2.set_xlim(0, total_min + 120)  # right margin for totals
+ax2.set_xlim(0, total_min + 120)
 
 for i, p in enumerate(people):
     y = i * (y_height + y_gap)
@@ -436,14 +484,12 @@ for i, p in enumerate(people):
     if w <= 0:
         continue
 
-    color = STORE_COLOR.get(p["store"], "#222222")  # ★ KeyError対策
+    color = STORE_COLOR.get(p["store"], "#222222")
     ax2.broken_barh([(x0, w)], (y, y_height), facecolors=color, edgecolors="none", alpha=0.90)
 
-    # memo only if exists
     if p["note"]:
         ax2.text(x0, y + y_height + 1, p["note"], fontsize=9, va="bottom", ha="left")
 
-    # total hours at right
     ax2.text(total_min + 10, y + y_height / 2, f"{p['minutes']/60:.2f} h",
              va="center", ha="left", fontsize=10)
 
@@ -472,5 +518,6 @@ ax2.set_title(f"Gantt ({target_day.isoformat()})")
 
 st.pyplot(fig2)
 
-st.info("スタッフ用URL： `https://<あなたのアプリ>.streamlit.app/?mode=staff`（共有OK）")
-st.warning("管理者用URL： `https://<あなたのアプリ>.streamlit.app/?mode=admin`（共有しない）")
+st.info("スタッフ用URL： `https://shift-app-nkyl4zuhzrjejz8zxxlh3a.streamlit.app/?mode=staff`（共有OK）")
+st.warning("管理者用URL： `https://shift-app-nkyl4zuhzrjejz8zxxlh3a.streamlit.app/?mode=admin`（共有しない）")
+
