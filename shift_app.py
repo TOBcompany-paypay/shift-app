@@ -60,85 +60,86 @@ STORE_COLOR = {"サブウェイ": "#2ecc71", "ハーゲンダッツ": "#ff66b3",
 # ============================================================
 # Helpers
 # ============================================================
-    if st.button("✅ まとめて送信", type="primary"):
-        if not name.strip():
-            st.error("名前を入力してね")
-            st.stop()
+if st.button("✅ まとめて送信", type="primary"):
+    if not name.strip():
+        st.error("名前を入力してね")
+        st.stop()
 
-        df = read_csv_safe(SHIFT_CSV, ["id","submitted_at","date","name","start","end","store","note"])
+    df = read_csv_safe(SHIFT_CSV, ["id","submitted_at","date","name","start","end","store","note"])
 
         # ======================================================
         # 1) 今回の提出内容を全部まとめる（ここで入力チェックもする）
         # ======================================================
-        rows_to_submit = []
-        for rid in st.session_state.rows:
-            d = st.session_state.get(f"d_{rid}")
-            s = st.session_state.get(f"s_{rid}")
-            e = st.session_state.get(f"e_{rid}")
-            store = normalize_store(st.session_state.get(f"store_{rid}", "どちらでも"))
-            note = (st.session_state.get(f"note_{rid}", "") or "").strip()
+    rows_to_submit = []
+    for rid in st.session_state.rows:
+        d = st.session_state.get(f"d_{rid}")
+        s = st.session_state.get(f"s_{rid}")
+        e = st.session_state.get(f"e_{rid}")
+        store = normalize_store(st.session_state.get(f"store_{rid}", "どちらでも"))
+        note = (st.session_state.get(f"note_{rid}", "") or "").strip()
 
-            if d is None or s is None or e is None:
-                st.error("日付/時間が未入力の行があります")
-                st.stop()
-            if e <= s:
-                st.error("終了が開始より前/同じの行があります")
-                st.stop()
+        if d is None or s is None or e is None:
+            st.error("日付/時間が未入力の行があります")
+            st.stop()
+        if e <= s:
+            st.error("終了が開始より前/同じの行があります")
+            st.stop()
 
-            date_str = normalize_date_str(d)  # ★必ず YYYY-MM-DD に
-            if not date_str:
-                st.error("日付の形式がおかしい行があります")
-                st.stop()
+        date_str = normalize_date_str(d)  # ★必ず YYYY-MM-DD に
+        if not date_str:
+            st.error("日付の形式がおかしい行があります")
+            st.stop()
 
-            rows_to_submit.append({
-                "date": date_str,
-                "name": name.strip(),
-                "start": hm(s),
-                "end": hm(e),
-                "store": store,
-                "note": note,
+        rows_to_submit.append({
+            "date": date_str,
+            "name": name.strip(),
+            "start": hm(s),
+            "end": hm(e),
+            "store": store,
+            "note": note,
             })
 
-        if len(rows_to_submit) == 0:
-            st.error("提出する行がありません")
-            st.stop()
+    if len(rows_to_submit) == 0:
+        st.error("提出する行がありません")
+        st.stop()
 
         # ======================================================
         # 2) 既存データを正規化して、(date, name) が一致するものだけ削除（上書き）
         #    ※日付が違えば削除されない＝別提出として残る
         # ======================================================
-        df["date_norm"] = df["date"].apply(normalize_date_str)
-        df["name_norm"] = df["name"].astype(str).str.strip()
+    df["date_norm"] = df["date"].apply(normalize_date_str)
+    df["name_norm"] = df["name"].astype(str).str.strip()
 
-        keys = {(r["date"], r["name"]) for r in rows_to_submit}  # 今回上書きしたいキー集合
+    keys = {(r["date"], r["name"]) for r in rows_to_submit}  # 今回上書きしたいキー集合
 
-        if len(df) > 0:
-            mask = df.apply(lambda r: (r["date_norm"], r["name_norm"]) in keys, axis=1)
-            df = df[~mask].copy()
+    if len(df) > 0:
+        mask = df.apply(lambda r: (r["date_norm"], r["name_norm"]) in keys, axis=1)
+        df = df[~mask].copy()
 
-        df = df.drop(columns=["date_norm","name_norm"], errors="ignore")
+    df = df.drop(columns=["date_norm","name_norm"], errors="ignore")
 
         # ======================================================
         # 3) 今回分を追加（複数行なら複数追加される）
         # ======================================================
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for r in rows_to_submit:
-            df.loc[len(df)] = [
-                str(uuid.uuid4()),
-                now_str,
-                r["date"],
-                r["name"],
-                r["start"],
-                r["end"],
-                r["store"],
-                r["note"],
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for r in rows_to_submit:
+        df.loc[len(df)] = [
+            str(uuid.uuid4()),
+            now_str,
+            r["date"],
+            r["name"],
+            r["start"],
+            r["end"],
+            r["store"],
+            r["note"],
             ]
 
-        save_csv(df, SHIFT_CSV)
-        st.success("提出しました！（同じ日付＋同じ名前は上書き / 日付が違えば別で提出できます）")
+    save_csv(df, SHIFT_CSV)
+    st.success("提出しました！（同じ日付＋同じ名前は上書き / 日付が違えば別で提出できます）")
 
-        st.session_state.rows = [0]
-        st.session_state.next_id = 1
+    st.session_state.rows = [0]
+    st.session_state.next_id = 1
+
 
     st.info("スタッフ用URL： `https://<あなたのアプリ>.streamlit.app/?mode=staff`")
     st.stop()
