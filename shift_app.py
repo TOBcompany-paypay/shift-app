@@ -306,27 +306,28 @@ if mode != "admin":
 
         df = df.drop(columns=["date_norm","name_norm"], errors="ignore")
 
-        # 3) 今回分追加
+        # 3) 今回分追加（列名で入れる＝ズレない）
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_rows = []
         for r in rows_to_submit:
-            df.loc[len(df)] = [
-                str(uuid.uuid4()),
-                now_str,
-                r["date"],
-                r["name"],
-                r["start"],
-                r["end"],
-                r["store"],
-                r["note"],
-            ]
+            new_rows.append({
+                "id": str(uuid.uuid4()),
+                "submitted_at": now_str,
+                "date": r["date"],
+                "name": r["name"],
+                "start": r["start"],
+                "end": r["end"],
+                "store": r["store"],
+                "note": r["note"],
+                })
 
-        #save_csv(df, SHIFT_CSV)
-        #st.success("提出しました！（同じ日付は上書き / 日付が違えば別で提出できます）")
+        df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
 
-        #st.session_state.rows = [0]
-        #st.session_state.next_id = 1
-        #st.rerun()
+        # 列順を固定（見やすさ用）
+        df = df[["id","submitted_at","date","name","start","end","store","note"]]
+
         save_csv(df, SHIFT_CSV)
+
 
         st.session_state.submitted_ok = True
         # 表示用に見やすく整形して保存
@@ -438,6 +439,40 @@ with col2:
 # Admin: Load shifts
 # ============================================================
 shift_df = read_csv_safe(SHIFT_CSV, ["id","submitted_at","date","name","start","end","store","note"])
+def fix_shift_df_misaligned(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    よくあるズレ：
+      date に名前、name に日付、note に店舗、store が None
+    を自動補正する
+    """
+    df = df.copy()
+
+    # 文字列化（None/NaN対策）
+    for c in ["date","name","start","end","store","note"]:
+        if c in df.columns:
+            df[c] = df[c].apply(lambda x: "" if (x is None or (isinstance(x,float) and pd.isna(x))) else str(x).strip())
+
+    # 判定：name が日付っぽい かつ date が日付じゃない → ズレ行とみなす
+    def is_date_str(x: str) -> bool:
+        return bool(normalize_date_str(x))
+
+    mis = df.apply(lambda r: (not is_date_str(r["date"])) and is_date_str(r["name"]), axis=1)
+
+    if mis.any():
+        # 補正
+        # 本来: date <- name列, name <- date列 なので入れ替え
+        df.loc[mis, ["date","name"]] = df.loc[mis, ["name","date"]].values
+
+        # store が空で note が店舗っぽい場合、note -> store に移す
+        df.loc[mis, "store"] = df.loc[mis, "note"].apply(normalize_store)
+
+        # note は空にする（必要なら残したいならここ変えてOK）
+        df.loc[mis, "note"] = ""
+
+    return df
+
+shift_df = fix_shift_df_misaligned(shift_df)
+
 if shift_df.empty:
     st.info("まだ提出がありません。")
     st.stop()
