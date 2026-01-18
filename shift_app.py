@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import pandas as pd
 import streamlit as st
@@ -30,6 +31,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 SHIFT_CSV = os.path.join(DATA_DIR, "shifts.csv")
 ALLOWED_CSV = os.path.join(DATA_DIR, "allowed_dates.csv")
+NAMES_CSV = os.path.join(DATA_DIR, "allowed_names.csv")
+
 
 # ============================================================
 # Admin password (Secrets or env)
@@ -151,6 +154,20 @@ for x in allowed_df["date"].tolist():
 allowed_dates = sorted(set(allowed_dates))
 
 # ============================================================
+# Load named dates
+# ============================================================
+names_df = read_csv_safe(NAMES_CSV, ["name"])
+allowed_names = []
+for x in names_df["name"].tolist():
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        continue
+    s = str(x).strip()
+    if s:
+        allowed_names.append(s)
+allowed_names = sorted(set(allowed_names))
+
+
+# ============================================================
 # UI: Title
 # ============================================================
 st.title("🗓 シフト管理")
@@ -160,6 +177,21 @@ st.title("🗓 シフト管理")
 # ============================================================
 if mode != "admin":
     st.subheader("✍️ スタッフ：シフト提出")
+    if st.session_state.get("submitted_ok", False):
+        st.success("✅ 送信完了！提出ありがとうございました。")
+        st.balloons()
+        submitted_rows = st.session_state.get("submitted_rows", [])
+        if submitted_rows:
+            st.write("### 今回送信した内容")
+            st.dataframe(pd.DataFrame(submitted_rows), use_container_width=True)
+
+        if st.button("もう一度提出する"):
+            st.session_state.submitted_ok = False
+            st.session_state.submitted_rows = []
+            st.rerun()
+
+        st.stop()
+
     st.caption("※スタッフにはこのURLだけ共有： `...?mode=staff`")
 
     if not allowed_dates:
@@ -171,7 +203,12 @@ if mode != "admin":
         st.session_state.rows = [0]
         st.session_state.next_id = 1
 
-    name = st.text_input("名前（必須）", key="staff_name")
+    if not allowed_names:
+        st.warning("スタッフ名が未登録です。管理者に連絡してください。")
+        st.stop()
+
+    name = st.selectbox("名前（必須）", allowed_names, key="staff_name_select")
+
 
     c1, c2 = st.columns(2)
     with c1:
@@ -283,12 +320,34 @@ if mode != "admin":
                 r["note"],
             ]
 
-        save_csv(df, SHIFT_CSV)
-        st.success("提出しました！（同じ日付＋同じ名前は上書き / 日付が違えば別で提出できます）")
+        #save_csv(df, SHIFT_CSV)
+        #st.success("提出しました！（同じ日付は上書き / 日付が違えば別で提出できます）")
 
+        #st.session_state.rows = [0]
+        #st.session_state.next_id = 1
+        #st.rerun()
+        save_csv(df, SHIFT_CSV)
+
+        st.session_state.submitted_ok = True
+        # 表示用に見やすく整形して保存
+        st.session_state.submitted_rows = [
+            {
+            "日付": r["date"],
+            "開始": r["start"],
+            "終了": r["end"],
+            "店舗": r["store"],
+            "メモ": r["note"] if r["note"] else "（なし）",
+            }
+            for r in rows_to_submit
+            ]
+
+        # 入力行を初期化
         st.session_state.rows = [0]
         st.session_state.next_id = 1
+
         st.rerun()
+
+
 
     st.info("スタッフ用URL： `https://shift-app-nkyl4zuhzrjejz8zxxlh3a.streamlit.app/?mode=staff`")
     st.stop()
@@ -345,6 +404,36 @@ with colB:
 
 st.divider()
 
+st.write("## 👤 登録スタッフ名（追加・削除）")
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    new_name = st.text_input("追加する名前", key="new_staff_name")
+    if st.button("➕ 名前を追加"):
+        nn = (new_name or "").strip()
+        if not nn:
+            st.error("名前が空です")
+        else:
+            allowed_names.append(nn)
+            allowed_names = sorted(set(allowed_names))
+            save_csv(pd.DataFrame({"name": allowed_names}), NAMES_CSV)
+            st.success("追加しました")
+            st.rerun()
+
+with col2:
+    if allowed_names:
+        st.write("### 登録済み（押すと削除）")
+        for n in allowed_names:
+            if st.button(f"❌ {n}", key=f"rm_name_{n}"):
+                allowed_names = [x for x in allowed_names if x != n]
+                save_csv(pd.DataFrame({"name": allowed_names}), NAMES_CSV)
+                st.success("削除しました")
+                st.rerun()
+    else:
+        st.info("まだ登録がありません。名前を追加してください。")
+
+
 # ============================================================
 # Admin: Load shifts
 # ============================================================
@@ -361,6 +450,28 @@ shift_df["end_norm"] = shift_df["end"].apply(lambda x: hm(parse_hm(x)) if parse_
 shift_df["store_norm"] = shift_df["store"].apply(normalize_store)
 shift_df["note_norm"] = shift_df["note"].apply(lambda x: "" if (x is None or (isinstance(x, float) and pd.isna(x))) else str(x).strip())
 shift_df["submitted_at_dt"] = pd.to_datetime(shift_df["submitted_at"], errors="coerce")
+
+st.write("## 🧹 集計から除外された行（理由つき）")
+
+bad = shift_df.copy()
+
+bad["bad_reason"] = ""
+bad.loc[bad["date_norm"] == "", "bad_reason"] += " date"
+bad.loc[bad["name_norm"] == "", "bad_reason"] += " name"
+bad.loc[bad["start_norm"] == "", "bad_reason"] += " start"
+bad.loc[bad["end_norm"] == "", "bad_reason"] += " end"
+
+excluded = bad[bad["bad_reason"] != ""].copy()
+
+if excluded.empty:
+    st.success("除外された行はありません。")
+else:
+    st.warning(f"除外 {len(excluded)} 件あります。下の bad_reason を見て直すと集計に入ります。")
+    st.dataframe(
+        excluded[["submitted_at","date","name","start","end","store","note","bad_reason"]],
+        use_container_width=True
+    )
+
 
 valid = shift_df[
     (shift_df["date_norm"] != "") &
@@ -528,5 +639,6 @@ st.pyplot(fig2)
 
 st.info("スタッフ用URL： `https://shift-app-nkyl4zuhzrjejz8zxxlh3a.streamlit.app/?mode=staff`（共有OK）")
 st.warning("管理者用URL： `https://shift-app-nkyl4zuhzrjejz8zxxlh3a.streamlit.app/?mode=admin`（共有しない）")
+
 
 
