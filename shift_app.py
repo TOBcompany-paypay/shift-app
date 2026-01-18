@@ -203,11 +203,20 @@ if mode != "admin":
         st.session_state.rows = [0]
         st.session_state.next_id = 1
 
-    if not allowed_names:
-        st.warning("スタッフ名が未登録です。管理者に連絡してください。")
-        st.stop()
+    st.write("### 名前（必須）")
 
-    name = st.selectbox("名前（必須）", allowed_names, key="staff_name_select")
+    # 登録名がある場合：候補を出しつつ手入力もできる（サジェスト）
+    # 登録名がない場合：最初から手入力
+    if allowed_names:
+        name = st.selectbox("名前を選択（または下で手入力）", ["（手入力）"] + allowed_names, key="staff_name_pick")
+        if name == "（手入力）":
+            name = st.text_input("名前を入力", key="staff_name_free")
+    else:
+        st.info("※スタッフ名の候補が未登録なので、名前を入力してください（管理者が後で登録できます）")
+        name = st.text_input("名前を入力", key="staff_name_free")
+
+    name = (name or "").strip()
+
 
 
     c1, c2 = st.columns(2)
