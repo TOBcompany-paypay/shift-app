@@ -332,6 +332,9 @@ st.divider()
 st.write("## 📥 提出データ（読み込み状況）")
 
 shift_df = read_csv_safe(SHIFT_CSV, ["id","submitted_at","date","name","start","end","store","note"])
+st.write("SHIFT_CSV:", SHIFT_CSV)
+st.write("exists:", os.path.exists(SHIFT_CSV))
+st.write("rows:", len(shift_df))
 if shift_df.empty:
     st.info("まだ提出がありません。")
     st.stop()
