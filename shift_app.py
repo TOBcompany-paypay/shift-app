@@ -60,170 +60,6 @@ STORE_COLOR = {"サブウェイ": "#2ecc71", "ハーゲンダッツ": "#ff66b3",
 # ============================================================
 # Helpers
 # ============================================================
-def read_csv_safe(path: str, cols: list[str]) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=cols)
-    df = pd.read_csv(path)
-    for c in cols:
-        if c not in df.columns:
-            df[c] = ""
-    return df
-
-def save_csv(df: pd.DataFrame, path: str):
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-
-def hm(t: time) -> str:
-    return t.strftime("%H:%M")
-
-def parse_hm(s):
-    """'HH:MM' 以外は None にする（nan/空/壊れ値は確実に落とす）"""
-    if s is None:
-        return None
-    if isinstance(s, float) and pd.isna(s):
-        return None
-    s = str(s).strip()
-    if not s or s.lower() == "nan":
-        return None
-    # 余計な秒が来たら切る（"09:00:00" -> "09:00"）
-    if len(s) >= 5 and s[2] == ":":
-        s = s[:5]
-    try:
-        return datetime.strptime(s, "%H:%M").time()
-    except Exception:
-        return None
-
-def dt_of(d: date, t: time) -> datetime:
-    return datetime.combine(d, t)
-
-def minutes_from(base: datetime, dt: datetime) -> float:
-    return (dt - base).total_seconds() / 60.0
-
-def build_slots(open_dt, close_dt, step_min):
-    t = open_dt
-    step = timedelta(minutes=step_min)
-    out = []
-    while t < close_dt:
-        out.append(t)
-        t += step
-    return out
-
-def normalize_store(x) -> str:
-    """古いCSV/空/NAN/揺れを救済して必ず3種に寄せる"""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return "どちらでも"
-    s = str(x).strip()
-    if not s or s.lower() == "nan":
-        return "どちらでも"
-    if s in STORE_OPTIONS:
-        return s
-    low = s.lower()
-    if "sub" in low:
-        return "サブウェイ"
-    if "haag" in low or "hagen" in low:
-        return "ハーゲンダッツ"
-    return "どちらでも"
-
-def display_name(name: str, store: str) -> str:
-    return f"{name}{STORE_LABEL.get(store, '(SH)')}"
-
-def normalize_date_str(x) -> str:
-    """
-    date が '2026-01-18', '2026/01/18', '2026-01-18 00:00:00' みたいに来ても
-    'YYYY-MM-DD' に統一。無理なら ''。
-    """
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    s = str(x).strip()
-    if not s or s.lower() == "nan":
-        return ""
-    # まず pandas に投げる
-    dt = pd.to_datetime(s, errors="coerce")
-    if pd.isna(dt):
-        return ""
-    return dt.date().isoformat()
-
-# ============================================================
-# Load allowed dates (as date objects)
-# ============================================================
-allowed_df = read_csv_safe(ALLOWED_CSV, ["date"])
-allowed_dates = []
-for x in allowed_df["date"].tolist():
-    ds = normalize_date_str(x)
-    if ds:
-        allowed_dates.append(datetime.strptime(ds, "%Y-%m-%d").date())
-allowed_dates = sorted(set(allowed_dates))
-
-# ============================================================
-# Title
-# ============================================================
-st.title("🗓 シフト管理")
-
-# ============================================================
-# STAFF PAGE
-# ============================================================
-if mode != "admin":
-    st.subheader("✍️ スタッフ：シフト提出")
-    st.caption("※スタッフにはこのURLだけ共有： `...?mode=staff`")
-
-    if not allowed_dates:
-        st.warning("提出可能日（試合日）が未設定です。管理者に連絡してください。")
-        st.stop()
-
-    if "rows" not in st.session_state:
-        st.session_state.rows = [0]
-        st.session_state.next_id = 1
-
-    name = st.text_input("名前（必須）", key="staff_name")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("➕ シフトを追加"):
-            st.session_state.rows.append(st.session_state.next_id)
-            st.session_state.next_id += 1
-    with c2:
-        if st.button("🧹 全部クリア"):
-            st.session_state.rows = [0]
-            st.session_state.next_id = 1
-
-    st.divider()
-
-    remove = []
-    for rid in list(st.session_state.rows):
-        with st.container(border=True):
-            top = st.columns([3, 1])
-            with top[0]:
-                st.markdown(f"### シフト {rid+1}")
-            with top[1]:
-                if st.button("🗑 削除", key=f"del_{rid}"):
-                    remove.append(rid)
-
-            d = st.selectbox(
-                "日付（提出可能日のみ）",
-                allowed_dates,
-                format_func=lambda x: x.strftime("%Y-%m-%d"),
-                key=f"d_{rid}"
-            )
-            s = st.time_input("開始", value=time(9, 0), key=f"s_{rid}")
-            e = st.time_input("終了", value=time(18, 0), key=f"e_{rid}")
-
-            store = st.radio(
-                "店舗",
-                STORE_OPTIONS,
-                horizontal=True,
-                key=f"store_{rid}"
-            )
-
-            note = st.text_input("メモ（任意）", key=f"note_{rid}")
-
-    if remove:
-        st.session_state.rows = [r for r in st.session_state.rows if r not in remove]
-        if not st.session_state.rows:
-            st.session_state.rows = [0]
-            st.session_state.next_id = 1
-        st.rerun()
-
-    st.divider()
-
     if st.button("✅ まとめて送信", type="primary"):
         if not name.strip():
             st.error("名前を入力してね")
@@ -231,7 +67,10 @@ if mode != "admin":
 
         df = read_csv_safe(SHIFT_CSV, ["id","submitted_at","date","name","start","end","store","note"])
 
-        # 行ごとに (date,name) を上書き
+        # ======================================================
+        # 1) 今回の提出内容を全部まとめる（ここで入力チェックもする）
+        # ======================================================
+        rows_to_submit = []
         for rid in st.session_state.rows:
             d = st.session_state.get(f"d_{rid}")
             s = st.session_state.get(f"s_{rid}")
@@ -246,27 +85,57 @@ if mode != "admin":
                 st.error("終了が開始より前/同じの行があります")
                 st.stop()
 
-            date_str = d.isoformat()
+            date_str = normalize_date_str(d)  # ★必ず YYYY-MM-DD に
+            if not date_str:
+                st.error("日付の形式がおかしい行があります")
+                st.stop()
 
-            # 既存を削除して上書き
-            df["date_norm"] = df["date"].apply(normalize_date_str)
-            df["name_norm"] = df["name"].astype(str).str.strip()
-            df = df[~((df["date_norm"] == date_str) & (df["name_norm"] == name.strip()))]
-            df = df.drop(columns=["date_norm","name_norm"], errors="ignore")
+            rows_to_submit.append({
+                "date": date_str,
+                "name": name.strip(),
+                "start": hm(s),
+                "end": hm(e),
+                "store": store,
+                "note": note,
+            })
 
+        if len(rows_to_submit) == 0:
+            st.error("提出する行がありません")
+            st.stop()
+
+        # ======================================================
+        # 2) 既存データを正規化して、(date, name) が一致するものだけ削除（上書き）
+        #    ※日付が違えば削除されない＝別提出として残る
+        # ======================================================
+        df["date_norm"] = df["date"].apply(normalize_date_str)
+        df["name_norm"] = df["name"].astype(str).str.strip()
+
+        keys = {(r["date"], r["name"]) for r in rows_to_submit}  # 今回上書きしたいキー集合
+
+        if len(df) > 0:
+            mask = df.apply(lambda r: (r["date_norm"], r["name_norm"]) in keys, axis=1)
+            df = df[~mask].copy()
+
+        df = df.drop(columns=["date_norm","name_norm"], errors="ignore")
+
+        # ======================================================
+        # 3) 今回分を追加（複数行なら複数追加される）
+        # ======================================================
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for r in rows_to_submit:
             df.loc[len(df)] = [
                 str(uuid.uuid4()),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                date_str,
-                name.strip(),
-                hm(s),
-                hm(e),
-                store,
-                note
+                now_str,
+                r["date"],
+                r["name"],
+                r["start"],
+                r["end"],
+                r["store"],
+                r["note"],
             ]
 
         save_csv(df, SHIFT_CSV)
-        st.success("提出しました！（同じ日付＋同じ名前は上書き）")
+        st.success("提出しました！（同じ日付＋同じ名前は上書き / 日付が違えば別で提出できます）")
 
         st.session_state.rows = [0]
         st.session_state.next_id = 1
